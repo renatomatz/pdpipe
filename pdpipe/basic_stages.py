@@ -268,6 +268,14 @@ class DropNa(PdPipelineStage):
 
     Supports all parameter supported by pandas.dropna function.
 
+    Parameters
+
+    ---------
+
+    columns: str or list-like, default None
+        Here simply for more standardized package notation, passed as the 
+        "subset" parameter in a dropna() call
+
     Example
     -------
         >>> import pandas as pd; import pdpipe as pdp;
@@ -282,9 +290,15 @@ class DropNa(PdPipelineStage):
     _DEF_DROPNA_APP_MSG = "Dropping null values..."
     _DROPNA_KWARGS = ['axis', 'how', 'thresh', 'subset', 'inplace']
 
-    def __init__(self, **kwargs):
+    def __init__(self, columns=None, **kwargs):
+
         common = set(kwargs.keys()).intersection(DropNa._DROPNA_KWARGS)
+
         self.dropna_kwargs = {key: kwargs.pop(key) for key in common}
+
+        if columns is not None:
+            self.dropna_kwargs["subset"] = _interpret_columns_param(columns)
+            
         super_kwargs = {
             'exmsg': DropNa._DEF_DROPNA_EXC_MSG,
             'appmsg': DropNa._DEF_DROPNA_APP_MSG,

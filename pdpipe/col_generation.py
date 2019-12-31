@@ -7,6 +7,7 @@ import tqdm
 
 from pdpipe.core import PdPipelineStage
 from pdpipe.util import out_of_place_col_insert, get_numeric_column_names
+from pdpipe.sklearn_stages import Impute                
 
 from pdpipe.shared import _interpret_columns_param, _list_str
 
@@ -639,7 +640,7 @@ class ColByFrameFunc(PdPipelineStage):
 
     Parameters
     ----------
-    column : str
+    result_columns : str, default None
         The name of the resulting column.
     func : function
         The function to be applied to the input dataframe. The function should
@@ -672,17 +673,23 @@ class ColByFrameFunc(PdPipelineStage):
     _DEF_DESCRIPTION_SUFFIX = "."
 
     def __init__(
-        self, column, func, follow_column=None, func_desc=None, **kwargs
+        self,
+        func,
+        result_columns=None,
+        follow_column=None,
+        func_desc=None,
+        **kwargs
     ):
-        self._column = column
         self._func = func
+        self._result_columns = result_columns if result_columns is not None \
+            else None
         self._follow_column = follow_column
         if func_desc is None:
             func_desc = ""
         else:
             func_desc = " " + func_desc
         self._func_desc = func_desc
-        base_str = ColByFrameFunc._BASE_STR.format(self._func_desc, column)
+        base_str = ColByFrameFunc._BASE_STR.format(self._func_desc, result_columns)
         super_kwargs = {
             "exmsg": base_str + ColByFrameFunc._DEF_EXC_MSG_SUFFIX,
             "appmsg": base_str + ColByFrameFunc._DEF_APP_MSG_SUFFIX,
@@ -709,7 +716,10 @@ class ColByFrameFunc(PdPipelineStage):
         else:
             loc = len(df.columns)
         inter_df = out_of_place_col_insert(
-            df=inter_df, series=new_col, loc=loc, column_name=self._column
+            df=inter_df, 
+            series=new_col,
+            loc=loc,
+            column_name=self._result_columns
         )
         return inter_df
 
@@ -960,3 +970,67 @@ class Log(PdPipelineStage):
                 df=inter_df, series=new_col, loc=loc, column_name=new_name
             )
         return inter_df
+
+class PivotCols(PdPipelineStage):
+    """Spread columns to make columns out of categorical values
+
+    Parameters
+
+    ----------
+
+    columns: str or list-like
+       names of columns to spread
+
+    values: str or list-like
+        values significant to these categories
+
+    impute_with: Impute or param, default None
+        Impute instance to be applied to newly-pivoted columns or a value
+        to be passed onto the Impute constructor. If None, columns missing 
+        values will remain
+    """
+
+    _DEF_PIVOTCOLS_EXC_MSG = "Pivoting columns {} with values {} failed"
+    _DEF_PIVOTCOLS_APP_MSG = "Pivoting columns {} with values {} ..."
+
+
+    def __init__(
+        self, 
+        columns, 
+        values, 
+        impute_with=None,
+        **kwargs):
+
+        """Initialize object
+
+        impute_with: how to impute missing values, can be one of
+        - None, in which case, missing values will remain untouched
+        - a constant to imput missing values with (imputer will be created)
+        - an Imputer strategy ("mean", "median", "most_frequent")
+        - a pre-created imputer
+        """
+        self.columns = _interpret_columns_param(columns)
+        self.values = _interpret_columns_param(values)
+
+        if not isinstance(impute_with, Impute) and impute_with is not None:
+            impute_with = Impute(imputer=impute_with)
+
+        self._imputer = impute_with
+
+        super_kwargs = {
+            "exmsg": PivotCols._DEF_PIVOTCOLS_EXC_MSG.format(columns, values),
+            "appmsg": PivotCols._DEF_PIVOTCOLS_APP_MSG.format(columns, values),
+            "desc": "Pivot columns {} with values {}.".format(columns, values) 
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+
+    def _transform(self, df, verbose):
+        if self._imputer is not None:
+            new_df = pd.pivot_table(df, columns=self.columns, values=self.values)
+            new_cols = list(set(new_df.columns) - set(df.columns))
+            return self._imputer._set_cols(new_cols).apply(new_df)
+        else:
+            return pd.pivot_table(df, columns=self.columns, values=self.values)
+
