@@ -20,3 +20,9 @@ class UnfittedPipelineStageError(Exception):
     unfitted pipeline stage.
     """
     pass
+
+class ConditionException(Exception):
+    """An exception raised when a condition is not met on a CheckCondition
+    pipeline stage
+    """
+    pass

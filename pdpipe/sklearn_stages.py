@@ -3,9 +3,9 @@
 import pandas as pd
 import numpy as np
 import sklearn.preprocessing
+from sklearn.impute import SimpleImputer
 import tqdm
 from skutil.preprocessing import scaler_by_params
-from sklearn.impute import SimpleImputer
 
 from pdpipe.core import PdPipelineStage
 from pdpipe.util import out_of_place_col_insert
@@ -134,7 +134,7 @@ class Encode(PdPipelineStage):
 
 
 class Scale(PdPipelineStage):
-    """A pipeline stage that scales data.
+    """A pipeline stage that scale"review_creation_date"s data.
 
     Parameters
     ----------
@@ -238,7 +238,7 @@ class Scale(PdPipelineStage):
     def _transform(self, df, verbose):
         cols_to_exclude = self._exclude_columns.copy()
         if self._exclude_obj_cols:
-            obj_cols = list((df.dtypes[df.dtypes == object]).index)
+            obj_cols = list((df.dtypes[df.dtfeaturesypes == object]).index)
             obj_cols = [x for x in obj_cols if x not in cols_to_exclude]
             cols_to_exclude += obj_cols
         self._col_order = list(df.columns)
@@ -264,9 +264,11 @@ class Scale(PdPipelineStage):
         if cols_to_exclude:
             res = pd.concat([res, excluded], axis=1)
             res = res[self._col_order]
+            
         return res
 
-class Imupte(PdPipelineStage):
+
+class Impute(PdPipelineStage):
     """Impute missing values given a strategy
 
     Parameters
@@ -323,8 +325,8 @@ class Imupte(PdPipelineStage):
             self._imputer = imputer
 
         super_kwargs = {
-            "exmsg": self._DEF_IMPUTE_EXC_MSG.format(str(self._columns)),
-            "appmesg": self._DEF_IMPUTE_APP_MSG.format(str(self._columns)),
+            "exmsg": Impute._DEF_IMPUTE_EXC_MSG.format(str(self._columns)),
+            "appmsg": Impute._DEF_IMPUTE_APP_MSG.format(str(self._columns)),
             "desc": "Impute {} by filling NaN values".format(
                 str(self._columns)
             )
@@ -338,8 +340,9 @@ class Imupte(PdPipelineStage):
     def set_imputer(self, imputer):
         self._imputer = imputer
 
-    def set_cols(self, columns):
+    def _set_cols(self, columns):
         self._columns = _interpret_columns_param(columns)
+        return self
 
     def set_simple_imputer(self, strategy="mean", **kwargs):
         """Set imputer to be an sklearn..SimpleImputer with given arguments
@@ -368,7 +371,7 @@ class Imupte(PdPipelineStage):
                 imputed_cols = df[[columns_to_impute]].replace(self._imputer)
             else:
                 imputed_cols = df[[columns_to_impute]]
-                for i, col in enumerate(columns_to_impute):
+                for _, col in enumerate(columns_to_impute):
                     imputed_cols[col] = self._imputer(columns_to_impute[col])            
 
             df[columns_to_impute] = imputed_cols
@@ -394,7 +397,7 @@ class Imupte(PdPipelineStage):
 
         try:
             if hasattr(self._imputer, "transform"):
-                imputed_cols = self._imputer.transform(df[columns_to_impute])
+                return self._imputer.transform(df[columns_to_impute])
             else:
                 return self._fit_transform(df, verbose)
 

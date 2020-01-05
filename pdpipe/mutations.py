@@ -13,7 +13,7 @@ import pandas as pd
 def to_weekday(X):
     """Convert column of pandas timestamps into their weekday from 0 to 6
     """
-    return X.apply(lambda x: x.weekday())  
+    return X.apply(lambda x: x.weekday)  
 
 def to_time_of_day(X):
     """Convert column of pandas timestamps into their time of day from 0 to 23

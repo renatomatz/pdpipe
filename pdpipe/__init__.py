@@ -29,7 +29,9 @@ from .basic_stages import (
     DropNa,
     FreqDrop,
     ColReorder,
-    RowDrop
+    RowDrop,
+    ConditionCheck,
+    CatReduce
 )
 
 core.__load_stage_attributes_from_module__("pdpipe.basic_stages")
@@ -44,13 +46,15 @@ from .col_generation import (
     ColByFrameFunc,
     AggByCols,
     Log,
+    PivotCols,
+    GroupApply
 )
 
 core.__load_stage_attributes_from_module__("pdpipe.col_generation")
 
 try:
     from . import sklearn_stages
-    from .sklearn_stages import Encode, Scale
+    from .sklearn_stages import Encode, Scale, Impute, SKStage
 
     core.__load_stage_attributes_from_module__("pdpipe.sklearn_stages")
 except ImportError:
@@ -60,6 +64,25 @@ except ImportError:
         "pdpipe: Scikit-learn or skutil import failed. Scikit-learn"
         "-dependent pipeline stages will not be loaded."
     )
+
+try:
+    from . import mutations
+    from .mutations import (
+        to_weekday, 
+        to_time_of_day,
+        diff,
+        time_diff
+    )
+
+    core.__load_stage_attributes_from_module__("pdpipe.mutations")
+except ImportError:
+    tb = traceback.format_exc()
+    warnings.warn(tb)
+    warnings.warn(
+        "pdpipe: Pandas import failed. Pandas"
+        "-dependent pipeline stages will not be loaded."
+    )
+
 
 try:
     from . import nltk_stages
@@ -81,31 +104,32 @@ except ImportError:
     )
 
 
-from ._version import get_versions
+# from ._version import get_versions
 
-__version__ = get_versions()["version"]
+# __version__ = get_versions()["version"]
 
-for name in [
-    "warnings",
-    "traceback",
-    "_custom_formatwarning",
-    "core",
-    "basic_stages",
-    "sklearn_stages",
-    "col_generation",
-    "shared",
-    "util",
-    "_version",
-    "get_versions",
-]:
-    try:
-        globals().pop(name)
-    except KeyError:
-        pass
-try:
-    del name  # pylint: disable=W0631
-except NameError:
-    pass
+# for name in [
+#     "warnings",
+#     "traceback",
+#     "_custom_formatwarning",
+#     "core",
+#     "basic_stages",
+#     "sklearn_stages",
+#     "col_generation",
+#     "mutations",
+#     "shared",
+#     "util",
+#     "_version",
+#     "get_versions",
+# ]:
+#     try:
+#         globals().pop(name)
+#     except KeyError:
+#         pass
+# try:
+#     del name  # pylint: disable=W0631
+# except NameError:
+#     pass
 
 # this dictates which modules are skipped on pdoc documentation generation
 __pdoc__ = {
