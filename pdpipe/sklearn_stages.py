@@ -10,7 +10,9 @@ pipeline stages.
 """
 
 import pandas as pd
+import numpy as np
 import sklearn.preprocessing
+from sklearn.impute import SimpleImputer
 import tqdm
 from skutil.preprocessing import scaler_by_params
 
@@ -141,7 +143,7 @@ class Encode(PdPipelineStage):
 
 
 class Scale(PdPipelineStage):
-    """A pipeline stage that scales data.
+    """A pipeline stage that scale"review_creation_date"s data.
 
     Parameters
     ----------
@@ -245,7 +247,7 @@ class Scale(PdPipelineStage):
     def _transform(self, df, verbose):
         cols_to_exclude = self._exclude_columns.copy()
         if self._exclude_obj_cols:
-            obj_cols = list((df.dtypes[df.dtypes == object]).index)
+            obj_cols = list((df.dtypes[df.dtfeaturesypes == object]).index)
             obj_cols = [x for x in obj_cols if x not in cols_to_exclude]
             cols_to_exclude += obj_cols
         self._col_order = list(df.columns)
@@ -271,4 +273,285 @@ class Scale(PdPipelineStage):
         if cols_to_exclude:
             res = pd.concat([res, excluded], axis=1)
             res = res[self._col_order]
+            
         return res
+
+
+class Impute(PdPipelineStage):
+    """Impute missing values given a strategy
+
+    Parameters
+
+    ----------
+
+    columns: str or list-like, default None
+        Columns to be imputed. If None, all columns will be imputed.
+
+    imputer: hashable, hasattr(imputer, "fit_transform"), dict or function, 
+             default None
+        If hashable, this will be imputed as a constant using an 
+        sklearn..SimpleImputer. If imputer has attribute "fit_transform"
+        assumes this will return imputed values. If dict, must have na_value as
+        key for mapping. If function without a "fit_transform" method, 
+        each column to be imputed will be passed onto it and the output is 
+        expected to be a series or array of the same length as before
+        If None, sklearn..SimpleImputer with default values will be used.
+
+    na_values: comparable or list like of such, default np.nan
+        Value or values to be imputed. 
+    """
+
+    _DEF_IMPUTE_EXC_MSG = (
+        "Imputation failed because not all columns "
+        "{} where found in the data frame."
+    )
+
+    _DEF_IMPUTE_APP_MSG = "Imputing {}"
+
+    def __init__(
+        self, columns=None, imputer=None, na_values=np.nan, **kwargs
+    ):
+        self._columns = None if columns is None \
+            else _interpret_columns_param(columns)
+
+        self._na_values = na_values
+
+        if imputer is None:
+            self._imputer = SimpleImputer(missing_values=self._na_values) 
+        elif _ishashable(imputer):
+            self._imputer = SimpleImputer(
+                                missing_values=self._na_values,
+                                strategy="constant",
+                                fill_value=imputer
+                            )
+        elif isinstance(imputer, dict):
+            if self._na_values in imputer.keys():
+                self._imputer = imputer
+            else:
+                raise ValueError("{} must be a key in imputer"\
+                                    .format(self._na_values))
+        else:
+            self._imputer = imputer
+
+        super_kwargs = {
+            "exmsg": Impute._DEF_IMPUTE_EXC_MSG.format(str(self._columns)),
+            "appmsg": Impute._DEF_IMPUTE_APP_MSG.format(str(self._columns)),
+            "desc": "Impute {} by filling NaN values".format(
+                str(self._columns)
+            )
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        return set(self._columns or []).issubset(df.columns)
+
+    def set_imputer(self, imputer):
+        self._imputer = imputer
+
+    def _set_cols(self, columns):
+        self._columns = _interpret_columns_param(columns)
+        return self
+
+    def set_simple_imputer(self, strategy="mean", **kwargs):
+        """Set imputer to be an sklearn..SimpleImputer with given arguments
+        """
+        self._imputer = SimpleImputer(
+                            missing_values=self._na_values,
+                            strategy=strategy,
+                            **kwargs
+                        )
+
+    def _fit_transform(self, df, verbose):
+
+        columns_to_impute = self._columns
+
+        if self._columns is None:
+            columns_to_impute = df.columns
+
+        if verbose:
+            tqdm.tqdm(columns_to_impute)
+
+        try:
+            if hasattr(self._imputer, "fit_transform"):
+                imputed_cols = self._imputer\
+                    .fit_transform(df[columns_to_impute])
+            elif isinstance(self._imputer, dict):
+                imputed_cols = df[[columns_to_impute]].replace(self._imputer)
+            else:
+                imputed_cols = df[[columns_to_impute]]
+                for _, col in enumerate(columns_to_impute):
+                    imputed_cols[col] = self._imputer(columns_to_impute[col])            
+
+            df[columns_to_impute] = imputed_cols
+
+        except Exception:
+            raise PipelineApplicationError(
+                "Exception raised when Imputation applied to columns {}".format(
+                    df.columns
+                )
+            )
+
+        return df
+
+    def _transform(self, df, verbose):
+
+        columns_to_impute = self._columns
+
+        if self._columns is None:
+            columns_to_impute = df.columns
+
+        if verbose:
+            tqdm.tqdm(columns_to_impute)
+
+        try:
+            if hasattr(self._imputer, "transform"):
+                return self._imputer.transform(df[columns_to_impute])
+            else:
+                return self._fit_transform(df, verbose)
+
+        except Exception:
+            raise PipelineApplicationError(
+                "Exception raised when Imputation applied to columns {}".format(
+                    df.columns
+                )
+            )
+
+        return df
+
+
+class SKStage(PdPipelineStage):
+    """Apply a scikit learn transformation onto a given dataframe. This should
+    not be used broadly as it cuts many paths, but it's made to be as flexible 
+    as possible with the given transformations.
+
+    Parameters
+
+    ----------
+
+    columns: str or list-like, default None
+        Columns to be imputed. If None, all columns will be transformed.
+
+    transformer: sklearn transformer with some "fit_transform" attribute
+                 default None
+       Scikit learn transformer to be used on data. If transformation leads to
+       more columns than there k, see description of new_col_suffix
+
+    drop: bool, default True
+        If set to True, the source columns are dropped after being transformed,
+        and the resulting transformed columns retain the names of the source
+        columns. Otherwise, see description of new_col_suffix
+
+    new_col_suffix: str, default to "new_col"
+        Suffix to be added to new columns if 
+            a) old column is not dropped 
+            b) transformations gives a different number of columns than
+               originally specified
+        Columns will be named new_col_suffix+"_"+str(n) where n is the column
+        relative to the newly transformed columns
+    """
+
+
+    def __init__(
+        self, 
+        columns=None,
+        transformer=None,
+        drop=True,
+        new_col_suffix="new_col",
+        **kwargs
+    ):
+        self._columns = None if columns is None \
+            else _interpret_columns_param(columns)
+
+        if hasattr(transformer, "fit_transform") or \
+           (hasattr(transformer, "fit") and hasattr(transformer, "transform")):
+           self._transformer=transformer
+        else:
+            raise ValueError("transformer must be transformable")
+
+        self._drop = drop
+        self._new_col_name_suffix = new_col_suffix        
+
+        super_kwargs = {
+            "exmsg": None,
+            "appmesg": None,
+            "desc": "Apply an scikit learn transformer on {}".format(
+                str(self._columns)
+            )
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        return set(self._columns or []).issubset(df.columns)
+
+    def _col_name_gen(self):
+        i = 0
+        while(True):
+            yield "{}_{}".format(self._new_col_name_suffix, i)
+            i += 1
+
+    def _get_new_col_names(self, n):
+        gen = self._col_name_gen()
+        return pd.Index([next(gen) for _ in range(n)])
+
+    def set_transformer(self, transformer):
+        self._transformer = transformer
+
+    def _fit_transform(self, df, verbose):
+
+        columns_to_transform = self._columns
+
+        if self._columns is None:
+            columns_to_transform = df.columns
+
+        if verbose:
+            tqdm.tqdm(columns_to_transform)
+
+        try:
+            if hasattr(self._transformer, "fit_transform"):
+                transformed_cols = self._transformer\
+                    .fit_transform(df[columns_to_transform])
+            else:
+                transformed_cols = self._transformer\
+                    .fit(df[columns_to_transform])\
+                    .transform(df[columns_to_transform])
+
+            if self._drop: 
+
+                if len(transformed_cols.columns) == len(columns_to_transform):
+                        df[columns_to_transform] = transformed_cols
+                else:
+
+                    loc = df.columns.get_loc(columns_to_transform[0])
+                    gen = self._col_name_gen()
+
+                    df.drop(columns_to_transform)
+                    
+                    for i in range(transformed_cols.shape[1]):
+                        df.insert(loc, next(gen), transformed_cols[:, i])
+
+            else:
+
+
+                new_col_names = self._get_new_col_names(
+                    transformed_cols.shape[1]
+                )
+
+                df[new_col_names] = transformed_cols
+
+        except Exception:
+            raise PipelineApplicationError(
+                "Exception raised when transformation applied to columns {}".format(
+                    df.columns
+                )
+            )
+
+        return df
+
+def _ishashable(x):
+    try:
+        hash(x)
+    except TypeError:
+        return False
+    return True

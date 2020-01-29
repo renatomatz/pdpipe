@@ -5,13 +5,17 @@ import pandas as pd
 import sortedcontainers as sc
 import tqdm
 
-from pdpipe.core import PdPipelineStage
-from pdpipe.util import out_of_place_col_insert, get_numeric_column_names
+import sys
+sys.path.insert(1, "/home/renato/Documents/Projects/pdpipe") #TODO remove this
 
+from pdpipe.core import PdPipelineStage
+from pdpipe.sklearn_stages import Impute
+from pdpipe.util import out_of_place_col_insert, get_numeric_column_names
 from pdpipe.shared import _interpret_columns_param, _list_str
 
 from .exceptions import PipelineApplicationError
 
+from warnings import warn
 
 class Bin(PdPipelineStage):
     """A pipeline stage that adds a binned version of a column or columns.
@@ -639,7 +643,7 @@ class ColByFrameFunc(PdPipelineStage):
 
     Parameters
     ----------
-    column : str
+    result_columns : str, default None
         The name of the resulting column.
     func : function
         The function to be applied to the input dataframe. The function should
@@ -672,17 +676,23 @@ class ColByFrameFunc(PdPipelineStage):
     _DEF_DESCRIPTION_SUFFIX = "."
 
     def __init__(
-        self, column, func, follow_column=None, func_desc=None, **kwargs
+        self,
+        func,
+        result_columns=None,
+        follow_column=None,
+        func_desc=None,
+        **kwargs
     ):
-        self._column = column
         self._func = func
+        self._result_columns = result_columns if result_columns is not None \
+            else None
         self._follow_column = follow_column
         if func_desc is None:
             func_desc = ""
         else:
             func_desc = " " + func_desc
         self._func_desc = func_desc
-        base_str = ColByFrameFunc._BASE_STR.format(self._func_desc, column)
+        base_str = ColByFrameFunc._BASE_STR.format(self._func_desc, result_columns)
         super_kwargs = {
             "exmsg": base_str + ColByFrameFunc._DEF_EXC_MSG_SUFFIX,
             "appmsg": base_str + ColByFrameFunc._DEF_APP_MSG_SUFFIX,
@@ -709,7 +719,10 @@ class ColByFrameFunc(PdPipelineStage):
         else:
             loc = len(df.columns)
         inter_df = out_of_place_col_insert(
-            df=inter_df, series=new_col, loc=loc, column_name=self._column
+            df=inter_df, 
+            series=new_col,
+            loc=loc,
+            column_name=self._result_columns
         )
         return inter_df
 
@@ -960,3 +973,235 @@ class Log(PdPipelineStage):
                 df=inter_df, series=new_col, loc=loc, column_name=new_name
             )
         return inter_df
+
+class PivotCols(PdPipelineStage):
+    """Spread columns to make columns out of categorical values
+
+    Parameters
+
+    ----------
+
+    values: str
+        column to aggregate
+
+    index: str or list-like, default None, required
+        group by this column(s) when aggregating, guaranteed to have one of each
+        categorical value after pivoting. Must be a subset of existing columns in df.
+
+    columns: str or list-like, required
+       names of columns to spread
+
+    impute_with: Impute or param, default None, required
+        Impute instance to be applied to newly-pivoted columns or a value
+        to be passed onto the Impute constructor. If None, columns missing 
+        values will remain
+
+        Keep in mind that if the "fill_value" parameter is specifed in
+        **kwargs, it will take precedence over any set imputer, as the 
+        values will be filled before the imputer can impute values
+    """
+
+    _DEF_PIVOTCOLS_EXC_MSG = "Pivoting columns {} with values {} failed"
+    _DEF_PIVOTCOLS_APP_MSG = "Pivoting columns {} with values {} ..."
+    _PIVOT_TABLE_KWARGS = ["aggfunc", "fill_value", "margins", "dropna", 
+                           "margins_name", "observed"]
+
+    def __init__(
+        self, 
+        values=None, 
+        index=None,
+        columns=None, 
+        impute_with=None,
+        **kwargs):
+
+        """Initialize object
+
+        impute_with: how to impute missing values, can be one of
+        - None, in which case, missing values will remain untouched
+        - a constant to imput missing values with (imputer will be created)
+        - an Imputer strategy ("mean", "median", "most_frequent")
+        - a pre-created imputer
+        """
+        assert values
+        assert index
+        assert columns
+
+        self._values = _interpret_columns_param(values)
+        self._index = index
+        self._columns = _interpret_columns_param(columns)
+
+        if not isinstance(impute_with, Impute) and impute_with is not None:
+            impute_with = Impute(imputer=impute_with)
+
+        self._imputer = impute_with
+
+        common = set(kwargs.keys()).intersection(PivotCols._PIVOT_TABLE_KWARGS)
+        self._pivot_table_kwargs = {key: kwargs.pop(key) for key in common}
+        if "aggfunc" not in self._pivot_table_kwargs.keys():
+            self._pivot_table_kwargs["aggfunc"] = np.sum
+
+        super_kwargs = {
+            "exmsg": PivotCols._DEF_PIVOTCOLS_EXC_MSG.format(columns, values),
+            "appmsg": PivotCols._DEF_PIVOTCOLS_APP_MSG.format(columns, values),
+            "desc": "Pivot columns {} with values {}.".format(columns, values) 
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        for col in (self._values + [self._index] + self._columns):
+            if col not in df.columns:
+                return False
+        return True
+
+    def _transform(self, df, verbose):
+        pivoted = pd.pivot_table(df, 
+                                    values=self._values, 
+                                    index=self._index, 
+                                    columns=self._columns,
+                                    **self._pivot_table_kwargs)
+
+        if self._imputer is not None:
+            pivoted = self._imputer(pivoted)
+                                    
+        pivoted[self._index] = pivoted.index
+        pivoted.index = np.arange(len(pivoted.index))
+        # pivot_table makes the specified index the new index
+        pivoted.columns = [
+            "_".join(col)
+            for col in pivoted.columns 
+            if isinstance(col, tuple)
+        ]
+        pivoted.rename(
+            {"{}_".format(self._index): self._index},
+            axis=1,
+            inplace=True
+        )
+
+        return pd.merge(
+            pivoted,
+            df.drop((self._values+self._columns), axis=1), 
+            how="left",
+            on=self._index
+        ).drop_duplicates()
+        # This stage merges the pivoted columns back together with the
+        # original dataframe while removing the columns used on the pivot
+
+        # If there are any more unique columns for the given index, they 
+        # will remain, but if the pivoted columns where the only containing
+        # unique values, the specified index should be unique
+
+
+class GroupApply(PdPipelineStage):
+    """Apply aggregation function to a column group and merge back data
+
+    Parameters
+
+    ----------
+
+    group_by: str of list-like, default None, required
+        Categorical columns on which to group by
+
+    func: function, np.sum by default
+        Function to aggregate columns. Must take in a series and output
+        a single value
+
+    columns: str, list-like, filter or function, default None
+       Columns to apply function on or filter function to get them. If None, 
+       function will be applied to all columns not included in group_by.
+
+    drop: bool, default True
+        Whether to drop aggregated columns.
+
+    """
+
+    _DEF_GROUPAPPLY_EXC_MSG = "Failed to apply function on columns{} grouped \
+        by {}"
+    _DEF_GROUPAPPLY_APP_MSG = "Applying function on columns {} grouped by {}"
+
+    def __init__(
+        self, 
+        group_by=None,
+        func=np.sum,
+        columns=None, 
+        drop=True,
+        **kwargs):
+
+        assert group_by
+        assert hasattr(func, "__call__")
+            
+        self._group_by = _interpret_columns_param(group_by) 
+        self._func = func
+        self._columns = columns
+
+        self._drop = drop
+
+        super_kwargs = {
+            "exmsg": GroupApply._DEF_GROUPAPPLY_EXC_MSG.format(
+                self._columns,
+                self._group_by
+            ),
+            "appmsg": GroupApply._DEF_GROUPAPPLY_APP_MSG.format(
+                self._columns, 
+                self._group_by
+            ),
+            "desc": "Applying function to columns {} groupped by {}.".format(
+                self._columns, 
+                self._group_by) 
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        for col in (self._group_by):
+            if col not in df.columns:
+                return False
+        return True
+
+    def _transform(self, df, verbose):
+
+        if self._columns is None:
+            columns_to_transform = set(self._columns).difference(df.columns)
+        elif isinstance(self._columns, str):
+            columns_to_transform = [self._columns]
+        elif hasattr(self._columns, "__call__"):
+            columns_to_transform = [*filter(self._columns, df.columns)]
+        elif isinstance(self._columns, filter):
+            columns_to_transform = [*self._columns]
+        else:
+            columns_to_transform = self._columns
+
+        columns_to_transform = [*filter(
+            lambda x: x not in self._group_by, 
+            columns_to_transform
+        )]
+        # assure that the groupped column is not in the list of columns
+        # to transform
+
+        agg_df = (
+            df[self._group_by + columns_to_transform]
+            .groupby(self._group_by)
+            .apply(self._func)
+        )
+
+        if len(set(self._group_by).intersection(agg_df.columns)) != 0:
+            # some aggregattion functions keep string values while others don't
+            # e.g. np.sum would keep an id column while np.mean would not
+            agg_df.drop(self._group_by, axis=1)
+        
+        if self._columns is not None:
+            # no need to re-merge as the whole dataset was transformed either way
+            agg_df = pd.merge(
+                df.drop(columns_to_transform, axis=1) if self._drop else df,
+                agg_df,
+                how="inner",
+                left_on=self._group_by,
+                right_index=True
+            ).drop_duplicates()
+
+        if agg_df.shape[1] != df.shape[1]:
+            warn("Columns {} where dropped during groupping".format(
+                    list(set(df.columns).difference(agg_df.columns))
+            ))
+
+        return agg_df

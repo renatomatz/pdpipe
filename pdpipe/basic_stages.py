@@ -2,10 +2,11 @@
 
 import types
 from collections import deque
-
 from strct.dicts import reverse_dict_partial
+from numbers import Number
 
 from pdpipe.core import PdPipelineStage
+from pdpipe.exceptions import ConditionException
 # from pdpipe.util import out_of_place_col_insert
 from pdpipe.shared import (
     _interpret_columns_param,
@@ -82,8 +83,9 @@ class ValDrop(PdPipelineStage):
 
     Parameters
     ----------
-    values : list-like
-        A list of the values to drop.
+    values : list-like, or callable
+        A list of the values to drop. Or callable that returns True for values
+        that should be dropped
     columns : str or list-like, default None
         The name, or an iterable of names, of columns to check for the given
         values. If set to None, all columns are checked.
@@ -143,7 +145,10 @@ class ValDrop(PdPipelineStage):
         if self._columns is None:
             columns_to_check = df.columns
         for col in columns_to_check:
-            inter_df = inter_df[~inter_df[col].isin(self._values)]
+            if callable(self._values):
+                inter_df = inter_df[~inter_df[col].apply(self._values)]
+            else:
+                inter_df = inter_df[~inter_df[col].isin(self._values)]
         if verbose:
             print("{} rows dropped.".format(before_count - len(inter_df)))
         return inter_df
@@ -268,6 +273,14 @@ class DropNa(PdPipelineStage):
 
     Supports all parameter supported by pandas.dropna function.
 
+    Parameters
+
+    ---------
+
+    columns: str or list-like, default None
+        Here simply for more standardized package notation, passed as the 
+        "subset" parameter in a dropna() call
+
     Example
     -------
         >>> import pandas as pd; import pdpipe as pdp;
@@ -282,9 +295,15 @@ class DropNa(PdPipelineStage):
     _DEF_DROPNA_APP_MSG = "Dropping null values..."
     _DROPNA_KWARGS = ['axis', 'how', 'thresh', 'subset', 'inplace']
 
-    def __init__(self, **kwargs):
+    def __init__(self, columns=None, **kwargs):
+
         common = set(kwargs.keys()).intersection(DropNa._DROPNA_KWARGS)
+
         self.dropna_kwargs = {key: kwargs.pop(key) for key in common}
+
+        if columns is not None:
+            self.dropna_kwargs["subset"] = _interpret_columns_param(columns)
+            
         super_kwargs = {
             'exmsg': DropNa._DEF_DROPNA_EXC_MSG,
             'appmsg': DropNa._DEF_DROPNA_APP_MSG,
@@ -525,3 +544,221 @@ class RowDrop(PdPipelineStage):
         if verbose:
             print("{} rows dropped.".format(before_count - len(inter_df)))
         return inter_df
+
+
+class ConditionCheck(PdPipelineStage):
+    """A pipeline stage that checks for a condition on a dataframe. Throws a 
+    ConditionException.
+
+    Parameters
+    ----------
+    conditions : callable, list-like or dict
+        The list of conditions that make a dataframe valid at this point in the
+        pipeline. Each condition must be a callable that take a dataframe and 
+        returns a bool value. If a list of callables is given, the conditions 
+        are checked for the whole dataframe. If a dict mapping column labels to
+        callables is given, then each condition is only checked for the column
+        values of the designated column. Conditions that return False will 
+        cause a ConditionException to be thrown
+    columns : str or iterable, optional
+        The label, or an iterable of labels, of columns. Optional. If given,
+        input conditions will be applied to the sub-dataframe made up of
+        these columns to determine which rows to drop.
+    """
+
+    _DEF_CONDCHECK_EXC_MSG = "Condition check failed"
+    _DEF_CONDCHECK_APPLY_MSG = "Checking for conditions"
+
+    def __init__(
+        self, 
+        conditions, 
+        columns=None, 
+        **kwargs
+    ):
+
+        self._conditions = _interpret_columns_param(conditions)
+
+        self._columns = columns if columns is None \
+            else _interpret_columns_param(columns)
+
+        valid = all([callable(cond) 
+            for cond in 
+                (conditions.values() if isinstance(self._conditions, dict) 
+                    else self._conditions)])
+
+        if not valid:
+            raise ValueError(
+                "Conditions must map to callables!")
+
+        super_kwargs = {
+            'exmsg': ConditionCheck._DEF_CONDCHECK_EXC_MSG,
+            'appmsg': ConditionCheck._DEF_CONDCHECK_APPLY_MSG,
+            'desc': "Check for a conditions"
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        return set(self._columns or []).issubset(df.columns)
+
+    def _transform(self, df, verbose):
+        
+        check_df = df if self._columns is None \
+            else df[self._columns] 
+
+        if isinstance(self._conditions, dict):
+            for cols, cond in self._conditions.items():
+                if not cond(check_df[cols]):
+                    raise ConditionException(
+                        "Condition {} not met on columns {}".format(
+                            cond, cols
+                        )
+                    )
+
+        elif isinstance(self._columns, list):
+            for cond in self._conditions:
+                if not cond(check_df):
+                    raise ConditionException(
+                        "Condition {} not met".format(cond)
+                    )
+
+        return df 
+
+
+class CatReduce(PdPipelineStage):
+    """Reduce the number of categories to top/specified members by keeping
+    top categories and leaving others as "other"
+
+    Parameters
+
+    ----------
+
+    columns: str or list-like, default None, required
+        Columns to apply transformation on. If None, transformation will be 
+        applied to all categorical columns
+
+    strategy: str, one of ["top", "min", "max", "top_min", "quantile"], 
+    default "top"
+        Strategy of selection based on result from aggregator function, where
+        n is the argument used by this strategy
+        top: keep top n, cut at point n
+        min/max: keep any value above/bellow n
+        top_min: keep all values above the top nth category. This can possibly
+        keep more than n values, but no arbitrary splits will be done.
+        quantile: keep values above the nth quantile, 0 <= n <= 1
+
+    n: int, default 5
+        Number to be used as argument to the strategy, this can be the n top
+        categories, or minimum aggregated ammount to appear, for example.
+
+    agg_func: callable aggregator, default len
+        Aggregator function to define top categories
+
+    must_have: str, list-like, default None, optional
+        Exceptions to the top_n columns to keep, in order to assure they are 
+        present in the column
+
+    other_label: str, default "other"
+        What to label values not included in the category to keep
+    """
+    
+    _DEF_CATREDUCE_EXC_MSG = "Failed to reduce columns {} by {}"
+    _DEF_CATREDUCE_APPLY_MSG = "Reducing columns {} by {}"
+    _STRATEGIES = ["top", "min", "max", "top_min", "quantile"] 
+
+    def __init__(
+        self,
+        columns=None,
+        strategy="top",
+        n=5,
+        agg_func=len,
+        must_have=None,
+        other_label="other",
+        **kwargs
+    ):
+
+        self._columns = columns if columns is None \
+            else _interpret_columns_param(columns)
+
+        if strategy in CatReduce._STRATEGIES:
+            self._strategy = strategy
+        else:
+            raise ValueError("strategy must be one of {}".format(
+                CatReduce._STRATEGIES
+            ))
+
+        if isinstance(n, Number):
+            self._n = n
+        else:
+            raise ValueError("n must be some kind of number")
+
+        if self._strategy == "quantile" and (self._n < 0 or self._n > 1):
+            raise ValueError("quantiles must be between 0 and 1")
+
+        if callable(agg_func):
+            self._agg_func = agg_func
+        else:
+            ValueError("agg_func must be a callable aggregator")
+
+        self._must_have = must_have if must_have is None \
+            else _interpret_columns_param(must_have)
+
+        self._other_label = other_label
+
+        super_kwargs = {
+            'exmsg': CatReduce._DEF_CATREDUCE_EXC_MSG,
+            'appmsg': CatReduce._DEF_CATREDUCE_APPLY_MSG,
+            'desc': "Reduce number of categories"
+        }
+        super_kwargs.update(**kwargs)
+        super().__init__(**super_kwargs)
+
+    def _prec(self, df):
+        return set(self._columns or []).issubset(df.columns)
+
+    def _transform(self, df, verbose):
+        
+        cols_to_transform = self._columns if self._columns is not None \
+            else df.select_dtypes("object").columns
+
+        for col in cols_to_transform:
+
+            agg = df.groupby(col).apply(self._agg_func)
+            
+            if self._strategy == "top":
+                cats_to_keep = list(
+                    agg.sort_values(ascending=False, axis=0)
+                       .head(int(self._n))
+                       .index
+                )
+
+            elif self._strategy == "min":
+                cats_to_keep = list(agg[agg >= self._n].index)
+
+            elif self._strategy == "max":
+                cats_to_keep = list(agg[agg <= self._n].index)
+
+            elif self._strategy == "top_min":
+                nth_top = agg.sort_values(ascending=False, axis=0)[int(self._n)]
+                cats_to_keep = list(agg[agg >= nth_top].index)
+
+            elif self._strategy == "quantile":
+                nth_quantile = agg.quantile(
+                    q=self._n, 
+                    interpolation="nearest"
+                ) 
+                cats_to_keep = list(agg[agg > nth_quantile].index)
+
+            else:
+                raise ValueError("strategy must be one of {}".format(
+                    CatReduce._STRATEGIES
+                ))
+
+            if self._must_have is not None:
+                cats_to_keep = list(set(cats_to_keep).union(self._must_have))
+
+            df[col] = df[col].apply(
+                lambda x: x if x in cats_to_keep else self._other_label
+            )
+
+        return df
