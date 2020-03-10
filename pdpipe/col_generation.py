@@ -5,17 +5,17 @@ import pandas as pd
 import sortedcontainers as sc
 import tqdm
 
-import sys
-sys.path.insert(1, "/home/renato/Documents/Projects/pdpipe") #TODO remove this
 
 from pdpipe.core import PdPipelineStage
 from pdpipe.sklearn_stages import Impute
 from pdpipe.util import out_of_place_col_insert, get_numeric_column_names
-from pdpipe.shared import _interpret_columns_param, _list_str
+from pdpipe.shared import _interpret_columns_param, _list_str, _get_df_cols
 
 from .exceptions import PipelineApplicationError
 
 from warnings import warn
+from functools import partial
+
 
 class Bin(PdPipelineStage):
     """A pipeline stage that adds a binned version of a column or columns.
@@ -974,6 +974,7 @@ class Log(PdPipelineStage):
             )
         return inter_df
 
+
 class PivotCols(PdPipelineStage):
     """Spread columns to make columns out of categorical values
 
@@ -1092,15 +1093,18 @@ class PivotCols(PdPipelineStage):
         # unique values, the specified index should be unique
 
 
-class GroupApply(PdPipelineStage):
-    """Apply aggregation function to a column group and merge back data
+class CustomApply(PdPipelineStage):
+    """Function to a column with various customizable options
+    While this can be used, by end users, this is mostly useful for
+    column modifier builders
 
     Parameters
 
     ----------
 
-    group_by: str of list-like, default None, required
+    group_by: str of list-like, default None
         Categorical columns on which to group by
+        If none, no grouping will be performed
 
     func: function, np.sum by default
         Function to aggregate columns. Must take in a series and output
@@ -1113,41 +1117,60 @@ class GroupApply(PdPipelineStage):
     drop: bool, default True
         Whether to drop aggregated columns.
 
+    result_columns: str or list-like, default None
+        Name of resulting columns
+
+    apply_func: str, "apply" by default
+        Method of applying a function to the columns
+        One of {"apply", "agg", "transform"}
+
+    rolling_w: int or None
+        Rolling window, if None, no rolling is done
+
     """
 
-    _DEF_GROUPAPPLY_EXC_MSG = "Failed to apply function on columns{} grouped \
+    _DEF_CUSTAPPLY_EXC_MSG = "Failed to apply function on columns{} grouped \
         by {}"
-    _DEF_GROUPAPPLY_APP_MSG = "Applying function on columns {} grouped by {}"
+    _DEF_CUSTAPPLY_APP_MSG = "Applying function on columns {} grouped by {}"
+    _DEF_APPLY_FUNCTIONS = ["apply", "agg", "transform"]
 
     def __init__(
-        self, 
+        self,
         group_by=None,
         func=np.sum,
-        columns=None, 
+        columns=None,
         drop=True,
+        result_columns=None,
+        apply_func="apply",
+        rolling_w=None,
         **kwargs):
 
-        assert group_by
         assert hasattr(func, "__call__")
+        assert apply_func in CustomApply._DEF_APPLY_FUNCTIONS
             
         self._group_by = _interpret_columns_param(group_by) 
         self._func = func
         self._columns = columns
-
+        self._result_columns = result_columns
+        self._apply_func = _get_apply_func(apply_func)
+        # _apply_func is a function that takes in a dataframe and returns 
+        # the propper function to be called with a function and continue
+        # the pipeline
+        self._rolling_w = rolling_w
         self._drop = drop
 
         super_kwargs = {
-            "exmsg": GroupApply._DEF_GROUPAPPLY_EXC_MSG.format(
+            "exmsg": CustomApply._DEF_CUSTAPPLY_EXC_MSG.format(
                 self._columns,
                 self._group_by
             ),
-            "appmsg": GroupApply._DEF_GROUPAPPLY_APP_MSG.format(
-                self._columns, 
+            "appmsg": CustomApply._DEF_CUSTAPPLY_APP_MSG.format(
+                self._columns,
                 self._group_by
             ),
             "desc": "Applying function to columns {} groupped by {}.".format(
-                self._columns, 
-                self._group_by) 
+                self._columns,
+                self._group_by)
         }
         super_kwargs.update(**kwargs)
         super().__init__(**super_kwargs)
@@ -1160,16 +1183,37 @@ class GroupApply(PdPipelineStage):
 
     def _transform(self, df, verbose):
 
-        if self._columns is None:
-            columns_to_transform = set(self._columns).difference(df.columns)
-        elif isinstance(self._columns, str):
-            columns_to_transform = [self._columns]
-        elif hasattr(self._columns, "__call__"):
-            columns_to_transform = [*filter(self._columns, df.columns)]
-        elif isinstance(self._columns, filter):
-            columns_to_transform = [*self._columns]
+        columns_to_transform = _get_df_cols(df, self._columns)
+
+        if self._group_by is not None:
+            return self._group_transform(df, columns_to_transform, verbose)
         else:
-            columns_to_transform = self._columns
+            return self._normal_transform(df, columns_to_transform, verbose)
+
+    def _normal_transform(self, df, columns_to_transform, verbose):
+        """Apply a transformation to each of the selected columns
+        """
+        inter_df = df
+        for i, colname in enumerate(self._columns):
+            source_col = df[colname]
+            loc = df.columns.get_loc(colname) + 1
+            new_name = self._result_columns[i]
+            if self._drop:
+                inter_df = inter_df.drop(colname, axis=1)
+                loc -= 1
+            inter_df = out_of_place_col_insert(
+                df=inter_df,
+                series=self._apply_func(source_col, self._rolling_w)(self._func),
+                loc=loc,
+                column_name=new_name,
+            )
+        return inter_df
+
+    def _group_transform(self, df, columns_to_transform, verbose):
+        """As group aggregations are performed only on certain columns
+        and aggregate data, which changes the dataframe shape, 
+        they require extra merging and steps
+        """
 
         columns_to_transform = [*filter(
             lambda x: x not in self._group_by, 
@@ -1181,14 +1225,27 @@ class GroupApply(PdPipelineStage):
         agg_df = (
             df[self._group_by + columns_to_transform]
             .groupby(self._group_by)
-            .apply(self._func)
         )
+
+        if self._rolling_ is not None:
+            agg_df = (
+                agg_df
+                .rolling(self._rolling_w)
+                .apply(self._func, raw=False)
+                .droplevel(1)
+                .fillna(0)
+            )
+        else:
+            agg_df = self._apply_func(agg_df)(self._func)
+
+        if self._result_columns is not None:
+            agg_df.columns = self._result_columnss
 
         if len(set(self._group_by).intersection(agg_df.columns)) != 0:
             # some aggregattion functions keep string values while others don't
             # e.g. np.sum would keep an id column while np.mean would not
             agg_df.drop(self._group_by, axis=1)
-        
+       
         if self._columns is not None:
             # no need to re-merge as the whole dataset was transformed either way
             agg_df = pd.merge(
@@ -1201,7 +1258,98 @@ class GroupApply(PdPipelineStage):
 
         if agg_df.shape[1] != df.shape[1]:
             warn("Columns {} where dropped during groupping".format(
-                    list(set(df.columns).difference(agg_df.columns))
+                list(set(df.columns).difference(agg_df.columns))
             ))
 
         return agg_df
+
+    def _get_apply_func(self, df, rolling_w=None):
+        """Factory to return a funciton that adds an "apply function" to 
+        a pipeline with additional commands
+
+        Each additional stage should return a callable, not a result
+        """
+
+        commands = []
+      
+        if rolling_w is not None:
+            commands.append(lambda x: x.rolling(rolling_w))
+
+        if self._apply_func == "apply":
+            commands.append(lambda x: partial(x.apply, raw=True))
+        elif self._apply_func == "agg":
+            commands.append(lambda x: x.agg)
+        elif self._apply_func == "transform":
+            commands.append(lambda x: x.transform)
+
+        df_new = df.copy()
+
+        for c in commands:
+            df_new = c(df_new)
+
+        return df_new
+
+
+class ColApply(CustomApply):
+    """Vanilla application of function into columns
+
+    Effective Attributes
+
+    --------------------
+
+    func: function, np.sum by default
+    columns: str, list-like, filter or function, default None
+    drop: bool, default True
+    result_columns: str or list-like, default None
+    rolling_w: int or None
+
+    """
+
+    def __init__(
+        self,
+        func=np.sum,
+        columns=None,
+        drop=True,
+        result_columns=None,
+        rolling_w=None,
+        **kwargs):
+
+        super().__init__(
+            self,
+            group_by=None,
+            func=func,
+            columns=columns,
+            drop=drop,
+            result_columns=result_columns,
+            apply_func="apply",
+            rolling_w=rolling_w,
+            **kwargs)
+
+
+class GroupApply(CustomApply):
+    """Apply function to a data group
+    """
+
+    def __init__(
+        self,
+        group_by=None,
+        func=np.sum,
+        columns=None,
+        drop=True,
+        result_columns=None,
+        apply_func="apply",
+        rolling_w=None,
+        **kwargs):
+
+        assert group_by
+
+        super().__init__(
+            group_by=group_by,
+            func=func,
+            columns=columns,
+            drop=drop,
+            result_columns=result_columns,
+            apply_func=apply_func,
+            rolling_w=rolling_w,
+            **kwargs)
+
