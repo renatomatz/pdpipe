@@ -1055,11 +1055,13 @@ class PivotCols(PdPipelineStage):
         return True
 
     def _transform(self, df, verbose):
-        pivoted = pd.pivot_table(df, 
-                                    values=self._values, 
-                                    index=self._index, 
-                                    columns=self._columns,
-                                    **self._pivot_table_kwargs)
+        pivoted = pd.pivot_table(
+            df, 
+            values=self._values, 
+            index=self._index, 
+            columns=self._columns,
+            **self._pivot_table_kwargs
+        )
 
         if self._imputer is not None:
             pivoted = self._imputer(pivoted)
@@ -1178,11 +1180,17 @@ class GroupApply(PdPipelineStage):
         # assure that the groupped column is not in the list of columns
         # to transform
 
+
         agg_df = (
             df[self._group_by + columns_to_transform]
             .groupby(self._group_by)
-            .apply(self._func)
         )
+
+        if verbose: 
+            tqdm.tqdm.pandas()
+            agg_df = agg_df.progress_apply(self._func)
+        else:
+            agg_df = agg_df.apply(self._func)
 
         if len(set(self._group_by).intersection(agg_df.columns)) != 0:
             # some aggregattion functions keep string values while others don't

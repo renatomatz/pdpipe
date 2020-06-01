@@ -10,6 +10,7 @@ import inspect
 import abc
 import collections
 import textwrap
+import tqdm
 
 from .exceptions import (
     FailedPreconditionError,

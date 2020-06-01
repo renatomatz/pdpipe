@@ -1,6 +1,8 @@
 """Basic pdpipe PdPipelineStages."""
 
 import types
+import tqdm
+
 from collections import deque
 from strct.dicts import reverse_dict_partial
 from numbers import Number
@@ -72,7 +74,7 @@ class ColDrop(PdPipelineStage):
         if callable(self._columns):
             cols_to_drop = [
                 col for col in df.columns
-                if self._columns(df[col])
+                if self._columns(col)
             ]
             return df.drop(cols_to_drop, axis=1, errors=self._errors)
         return df.drop(self._columns, axis=1, errors=self._errors)
@@ -601,13 +603,15 @@ class ConditionCheck(PdPipelineStage):
     def _prec(self, df):
         return set(self._columns or []).issubset(df.columns)
 
-    def _transform(self, df, verbose):
+    def _transform(self, df, verbose=False):
         
         check_df = df if self._columns is None \
             else df[self._columns] 
 
         if isinstance(self._conditions, dict):
-            for cols, cond in self._conditions.items():
+            check = tqdm.tqdm(self._conditions.items()) if verbose\
+                else self._conditions.items()
+            for cols, cond in check:
                 if not cond(check_df[cols]):
                     raise ConditionException(
                         "Condition {} not met on columns {}".format(
@@ -616,7 +620,9 @@ class ConditionCheck(PdPipelineStage):
                     )
 
         elif isinstance(self._columns, list):
-            for cond in self._conditions:
+            check = tqdm.tqdm(self._conditions) if verbose \
+                else self._conditions
+            for cond in check:
                 if not cond(check_df):
                     raise ConditionException(
                         "Condition {} not met".format(cond)
@@ -716,11 +722,13 @@ class CatReduce(PdPipelineStage):
     def _prec(self, df):
         return set(self._columns or []).issubset(df.columns)
 
-    def _transform(self, df, verbose):
+    def _transform(self, df, verbose=False):
         
         cols_to_transform = self._columns if self._columns is not None \
             else df.select_dtypes("object").columns
 
+        if verbose:
+            cols_to_transform = tqdm.tqdm(cols_to_transform)
         for col in cols_to_transform:
 
             agg = df.groupby(col).apply(self._agg_func)
